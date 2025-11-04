@@ -20,7 +20,9 @@ settings:
     type: STRING
   STASHDB_ENDPOINT_SUBSTR:
     displayName: StashDB host match (e.g. stashdb.org)
+    description: Only change this if whisparr adds custom stashbox support
     type: STRING
   MONITORED:
-    displayName: Monitor after add (true/false)
-    type: STRING
+    displayName: Monitor after add
+    description: Mark the scene as monitored when synced
+    type: BOOLEAN

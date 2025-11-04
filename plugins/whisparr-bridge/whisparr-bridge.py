@@ -82,7 +82,7 @@ def main():
     whisparr_url = (plugin_cfg.get("WHISPARR_URL") or "").rstrip("/")
     whisparr_key = plugin_cfg.get("WHISPARR_API_KEY") or ""
     match_substr = plugin_cfg.get("STASHDB_ENDPOINT_SUBSTR") or "stashdb.org"
-    monitored = (plugin_cfg.get("MONITORED") or "").strip().lower() == "true"
+    monitored = (plugin_cfg.get("MONITORED") or True)
 
     if not whisparr_url or not whisparr_key:
         log.error("Missing Whisparr settings (URL/API key).")
