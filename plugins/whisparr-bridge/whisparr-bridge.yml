@@ -26,3 +26,89 @@ settings:
     displayName: Monitor after add
     description: Mark the scene as monitored when synced
     type: BOOLEAN
+  MOVE_FILES:
+    displayName: Move Files
+    description: Move files after processing
+    type: BOOLEAN
+
+  WHISPARR_RENAME:
+    displayName: Enable Whisparr Rename
+    description: Rename files using Whisparr conventions
+    type: BOOLEAN
+
+  QUALITY_PROFILE:
+    displayName: Quality Profile
+    description: Default quality profile for downloads
+    type: STRING
+
+  ROOT_FOLDER:
+    displayName: Root Folder
+    description: Optional root folder for downloads
+    type: STRING
+
+  IGNORE_TAGS:
+    displayName: Ignore Tags
+    description: List of tags to ignore when adding
+    type: STRING
+
+  # =========================
+  # Logging Configuration
+  # =========================
+  LOG_LEVEL:
+    displayName: Log Level
+    description: Stash / console logging level
+    type: STRING
+
+  LOG_FILE_ENABLE:
+    displayName: Enable File Logging
+    description: Enable logging to file
+    type: BOOLEAN
+
+  LOG_FILE_LEVEL:
+    displayName: File Log Level
+    description: Logging level for file output
+    type: STRING
+
+  LOG_FILE_LOCATION:
+    displayName: File Log Location
+    description: File path for logs; empty = default
+    type: STRING
+
+
+  LOG_FILE_TYPE:
+    displayName: Log File Type
+    description: Options SINGLE-FILE, ROTATING_SIZE, ROTATING_TIME
+    type: STRING
+
+  LOG_FILE_MAX_BYTES:
+    displayName: Max File Size (bytes)
+    description: Only for ROTATING_SIZE log type
+    type: INTEGER
+    default: 5000000
+
+  LOG_FILE_BACKUP_COUNT:
+    displayName: File Backup Count
+    description: Number of backups for rotating logs
+    type: INTEGER
+    default: 3
+
+  LOG_FILE_ROTATE_WHEN:
+    displayName: Rotate Logs When
+    description: Only for ROTATING_TIME type
+    type: STRING
+
+  LOG_FILE_USE_COLOR:
+    displayName: Use Color in Logs
+    description: Apply ANSI color codes in file logs
+    type: BOOLEAN
+    default: false
+
+  MAX_LOG_BODY:
+    displayName: Max Log Body
+    description: Maximum number of characters to log per message
+    type: INTEGER
+
+  MAX_PATH_LENGTH:
+    displayName: Max Path Length
+    description: Maximum length of file paths in logs
+    type: INTEGER
