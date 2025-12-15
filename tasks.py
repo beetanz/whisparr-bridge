@@ -1,6 +1,6 @@
 from invoke import task
 import sys
-
+from pathlib import Path
 SOURCE_DIRS = ["plugins/whisparr-bridge", "tests"]
 
 # Simple color helpers
@@ -68,3 +68,31 @@ def dev(c, fix: bool = False):
     typecheck(c)
     test(c)
     print(green("🎉 All dev tasks completed successfully!"))
+@task
+def export_reqs(c):
+    """
+    Export requirements.txt and requirements-dev.txt from Poetry lock file.
+    Compatible with Poetry 2.x.
+    """
+    # Ensure export plugin is available
+    print("🔹 Checking if Poetry export plugin is installed...")
+    result = c.run("poetry export --help", warn=True, hide=True)
+    if result.exited != 0:
+        print("❌ Poetry export command not found. Installing plugin...")
+        c.run("poetry self add poetry-plugin-export")
+
+    # Create requirements directory
+    requirements_dir = Path("plugins/whisparr-bridge")
+    requirements_dir.mkdir(parents=True, exist_ok=True)
+
+    main_reqs = requirements_dir / "requirements.txt"
+    dev_reqs = "requirements-dev.txt"
+
+    print("🔹 Exporting main requirements.txt")
+    c.run(f'poetry export -f requirements.txt --output "{main_reqs}" --without-hashes')
+
+    print("🔹 Exporting dev requirements-dev.txt")
+    c.run(f'poetry export -f requirements.txt --output "{dev_reqs}" --without-hashes --with dev')
+
+    print("✅ requirements.txt and requirements-dev.txt updated successfully")
+
