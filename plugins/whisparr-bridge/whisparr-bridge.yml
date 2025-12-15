@@ -99,7 +99,6 @@ settings:
     displayName: Use Color in Logs
     description: Apply ANSI color codes in file logs
     type: BOOLEAN
-    default: false
 
   MAX_LOG_BODY:
     displayName: Max Log Body
