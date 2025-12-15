@@ -1,6 +1,13 @@
 # Whisparr Bridge
 
-Whisparr Bridge is a [Stash](https://stashapp.cc/) plugin that syncs scenes into [Whisparr](https://github.com/Whisparr/Whisparr/) when they have a StashDB link. The plugin automatically creates or updates movies in Whisparr based on your configured defaults, imports files, and optionally renames them according to Whisparr rules.
+Whisparr Bridge is a [Stash](https://stashapp.cc/) plugin that syncs scenes into [Whisparr](https://github.com/Whisparr/Whisparr/) when they have a StashDB link. 
+
+Automated management of scene files, including:
+
+- Adding movies from Stash to Whisparr
+- Importing files from Stash to Whisparr
+- Moving files to the correct directories
+- Optional renaming of files via Whisparr
 
 ---
 
@@ -13,7 +20,13 @@ Whisparr Bridge is a [Stash](https://stashapp.cc/) plugin that syncs scenes into
 - Detailed logging is provided for both console and file outputs.  
 
 ---
+## Requirements
 
+- Python 3.10+ (or tomli)
+- Pydantic
+- Requests
+- `stashapi` library (custom Stash API interface)
+---
 ## Installation
 
 1. Copy `whisparr-bridge.py` and `whisparr-bridge.yml` into your Stash plugins directory.  
@@ -22,6 +35,7 @@ Whisparr Bridge is a [Stash](https://stashapp.cc/) plugin that syncs scenes into
    ```bash
    pip install stashapp-tools
    pip install pydantic
+   pip install tomli (Python<3.10)
    ```
 
 3. Restart or reload Stash to pick up the new plugin.
@@ -59,7 +73,6 @@ Whisparr Bridge is a [Stash](https://stashapp.cc/) plugin that syncs scenes into
 | `LOG_FILE_USE_COLOR` | Apply ANSI color codes in log file output. | `False` |
 | `LOG_CONSOLE_ENABLE` | Enable console logging. | `False` |
 
-> **Note:** Plugin settings are dynamically loaded from Stash. Missing or blank settings may prevent syncing.
 
 ---
 
@@ -79,7 +92,19 @@ Whisparr Bridge is a [Stash](https://stashapp.cc/) plugin that syncs scenes into
 - Logging levels are configurable separately for console and file.
 
 ---
+### Workflow
 
+1. Reads JSON scene data from Stash via stdin.
+2. Loads plugin configuration and initializes logging.
+3. Fetches the scene from Stash and checks for ignored tags.
+4. Checks if the movie already exists in Whisparr.
+5. Creates the movie in Whisparr if it does not exist.
+6. Processes all files in the scene:
+    - Moves files if needed
+    - Imports files into Whisparr
+    - Optionally queues a rename operation
+
+---
 ## Workflow Example
 
 ```mermaid
@@ -120,7 +145,15 @@ flowchart TD
 - **Unexpected HTTP errors:** Check the logs for the exact response from Whisparr.
 
 ---
+## Exceptions
 
+Custom exceptions used in the bridge:
+
+- `WhisparrError` – General Whisparr-related error
+- `SceneNotFoundError` – Raised when a scene is missing in Whisparr
+- `ManualImportError` – Raised when manual import fails
+
+---
 ## License
 
 This project does not currently include an explicit license. Please open an issue or contact the author for clarification on usage rights.
