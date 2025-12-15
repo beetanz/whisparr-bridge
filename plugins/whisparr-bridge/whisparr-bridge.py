@@ -164,16 +164,16 @@ class StashSceneModel(RetrievedModel):
             return [item["name"] for item in v]
         return v
 
-    @computed_field
     @property
+    @computed_field
     def stashdb_id(self) -> Optional[str]:
         for sid in self.stash_ids:
             if self.stashdb_endpoint_substr in sid.get("endpoint", ""):
                 return sid.get("stash_id")
         return None
 
-    @computed_field
     @property
+    @computed_field
     def paths(self) -> List[Path]:
         return [f.path for f in self.files if f.path]
 
@@ -261,13 +261,19 @@ class WhisparrInterface:
         self.move: bool = config.MOVE_FILES
         self.http_json = http_func
         self.rename: bool = config.WHISPARR_RENAME
-        self.root_dir: str = config.ROOT_FOLDER
+        self.root_dir: str = str(config.ROOT_FOLDER)
         self.qualprofile: str = config.QUALITY_PROFILE
 
     def process_scene(self) -> None:
+        """
+        Process the Stash scene: find it in Whisparr, create if missing,
+        and handle file imports/moves.
+        """
         self.whisparr_scene = self.find_existing_scene()
+
         if not self.whisparr_scene:
             self.create_scene()
+
         self.process_stash_files()
 
     def find_existing_scene(self) -> Optional[WhisparrScene]:
@@ -291,10 +297,17 @@ class WhisparrInterface:
         return scenes[0]
 
     def create_scene(self) -> None:
+        """
+        Create a Whisparr scene based on the Stash scene.
+        Guaranteed to have a stashdb_id at this point.
+        """
+        # Assert stashdb_id exists to satisfy mypy
+        stashdb_id: str = self.stash_scene.stashdb_id  # type: ignore[assignment]
+
         scene_payload = WhisparrSceneCreate(
             title=self.stash_scene.title,
-            foreignId=self.stash_scene.stashdb_id,
-            stashId=self.stash_scene.stashdb_id,
+            foreignId=stashdb_id,
+            stashId=stashdb_id,
             monitored=self.monitored,
             qualityProfileId=self.get_default_quality_profile(),
             rootFolderPath=self.get_default_root_folder(),
@@ -303,6 +316,7 @@ class WhisparrInterface:
                 "searchForMovie": False,
             },
         )
+
         status, scene = self.http_json(
             method="POST",
             url=f"{self.url}/api/v3/movie",
@@ -311,9 +325,15 @@ class WhisparrInterface:
             timeout=120,
             response_model=WhisparrScene,
         )
+
         self.whisparr_scene = scene
+
         if status in (200, 201):
             logger.info("Added movie '%s' to Whisparr", self.stash_scene.title)
+        else:
+            msg = f"Failed to add movie '{self.stash_scene.title}': {scene}"
+            logger.error(msg)
+            raise WhisparrError(msg)
 
     def process_stash_files(self) -> None:
         """Process each file in the Stash scene."""
@@ -337,6 +357,7 @@ class WhisparrInterface:
 
     def ensure_file_location(self, stash_path: Path) -> bool:
         """Ensure the file is in the correct Whisparr directory, moving it if necessary."""
+        assert self.whisparr_scene is not None
         target_dir = self.whisparr_scene.path
         if not target_dir:
             logger.error("Whisparr scene has no path defined.")
@@ -399,6 +420,7 @@ class WhisparrInterface:
     def _get_manual_import_preview(
         self, stash_path: Path
     ) -> List[ManualImportPreviewFile]:
+        assert self.whisparr_scene is not None
         params = ManualImportParams(
             folder=stash_path.parent.as_posix(), movieId=self.whisparr_scene.id
         )
@@ -425,6 +447,7 @@ class WhisparrInterface:
         return matched
 
     def _execute_manual_import(self, preview_file: ManualImportPreviewFile) -> None:
+        assert self.whisparr_scene is not None
         command = ManualImportCommand(
             files=[
                 ManualImportFile(
@@ -476,17 +499,26 @@ class WhisparrInterface:
         )
         if any_id is None and qps:
             any_id = qps[0]["id"]
-        return int(any_id)
+        return int(any_id or 1)
 
     def get_default_root_folder(self) -> str:
-        _, rfs = self.http_json(
+        result = self.http_json(
             method="GET", url=f"{self.url}/api/v3/rootfolder", api_key=self.key
         )
-        if self.root_dir:
+        rfs: List[Dict[str, str]] = result[1]
+
+        # Check for configured root_dir
+        if self.root_dir != "":
             rf = next((rf for rf in rfs if rf["path"] == self.root_dir), None)
-            if rf:
+            if rf is not None:
                 return rf["path"]
-        return rfs[0]["path"]
+
+        # Fallback to first root folder if available
+        if rfs:
+            return rfs[0]["path"]
+
+        # Safe fallback if list is empty
+        raise ValueError("No root folders returned from API")
 
 
 # =========================

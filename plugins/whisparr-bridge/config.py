@@ -1,17 +1,20 @@
 import copy
+import json
 import logging
 import sys
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
-from typing import Optional
-from typing import List, Any
-import tomli
-from pydantic import ValidationError
-from stashapi import log as stash_log
-from pydantic import BaseModel, Field, field_validator
-from pydantic import ConfigDict
-import json
+from typing import Any, List, Optional
 
+import tomli
+from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
+                      field_validator)
+from stashapi import log as stash_log
+
+
+# =========================
+# Plugin Configuration
+# =========================
 class PluginConfig(BaseModel):
     # Core
     WHISPARR_URL: str = ""
@@ -23,7 +26,7 @@ class PluginConfig(BaseModel):
     MOVE_FILES: bool = False
     WHISPARR_RENAME: bool = True
     QUALITY_PROFILE: str = "Any"
-    ROOT_FOLDER: Optional[str] = None
+    ROOT_FOLDER: Optional[str] = str("")
     IGNORE_TAGS: List[str] = Field(default_factory=list)
 
     # Logging
@@ -47,7 +50,6 @@ class PluginConfig(BaseModel):
     # ----------------------
     # Validators
     # ----------------------
-
     @field_validator("IGNORE_TAGS", mode="before")
     @classmethod
     def normalize_ignore_tags(cls, v):
@@ -70,6 +72,9 @@ class PluginConfig(BaseModel):
         return v.strip()
 
 
+# =========================
+# Config Loaders
+# =========================
 def load_from_toml(path: str) -> dict:
     p = Path(path)
     if not p.is_file():
@@ -81,14 +86,7 @@ def load_from_toml(path: str) -> dict:
 def load_plugin_config(
     toml_path: str = "config.toml", stash: Optional[dict] = None
 ) -> PluginConfig:
-    """
-    Load and validate plugin configuration.
-
-    1. Load defaults from PluginConfig.
-    2. Override with TOML file if present.
-    3. Optionally merge Stash plugin settings if `stash` dict is provided.
-    """
-    config = PluginConfig()
+    config = PluginConfig()  # defaults
 
     path = Path(toml_path)
     if path.is_file():
@@ -96,12 +94,12 @@ def load_plugin_config(
             with path.open("rb") as f:
                 toml_data = tomli.load(f)
             config = config.model_copy(update=toml_data)
-            stash_log.info("Configuration loaded and validated from %s", toml_path)
+            stash_log.info(f"Configuration loaded and validated from {toml_path}")
         except Exception as e:
-            stash_log.exception("Failed to load/validate config from TOML: %s", e)
+            stash_log.error(f"Failed to load/validate config from TOML: {e}")
             raise
     else:
-        stash_log.warning("Config file %s not found. Using defaults.", toml_path)
+        stash_log.warning(f"Config file {toml_path} not found. Using defaults.")
 
     if stash:
         plugin_cfg = stash.get("plugins", {}).get("whisparr-bridge", {})
@@ -110,7 +108,7 @@ def load_plugin_config(
                 config = config.model_copy(update=plugin_cfg)
                 stash_log.info("Stash plugin settings merged and validated into config")
             except ValidationError as e:
-                stash_log.exception("Stash plugin settings validation failed: %s", e)
+                stash_log.error(f"Stash plugin settings validation failed: {e}")
                 raise
         else:
             stash_log.warning(
@@ -125,20 +123,15 @@ def load_plugin_config(
 
 
 # =========================
-# Logging Setup
-# =========================
-
-# =========================
 # Helpers (config-aware)
 # =========================
-# Assume CONFIG is set globally after loading
 CONFIG: Optional[PluginConfig] = None
 
 
 def truncate_path(p: Path) -> str:
     s = str(p)
     if CONFIG is None:
-        return s if len(s) <= 100 else f"...{s[-97:]}"  # fallback max length
+        return s if len(s) <= 100 else f"...{s[-97:]}"
     return (
         s
         if len(s) <= CONFIG.MAX_PATH_LENGTH
@@ -146,15 +139,8 @@ def truncate_path(p: Path) -> str:
     )
 
 
-def safe_json_preview(data:Any) -> str:
-    """
-    Convert data to JSON string for logging, redacting API keys and truncating
-    long output based on CONFIG.MAX_LOG_BODY.
-    """
-    if CONFIG is None:
-        max_len = 1000
-    else:
-        max_len = CONFIG.MAX_LOG_BODY
+def safe_json_preview(data: Any) -> str:
+    max_len = CONFIG.MAX_LOG_BODY if CONFIG else 1000
     try:
         if isinstance(data, dict):
             redacted = dict(data)
@@ -164,18 +150,20 @@ def safe_json_preview(data:Any) -> str:
             text = json.dumps(redacted, default=str)
         else:
             text = json.dumps(data, default=str)
-
         return text if len(text) <= max_len else text[:max_len] + "...(truncated)"
     except TypeError:
         return "<unserializable>"
 
 
+# =========================
+# Logging
+# =========================
 LOG_COLORS = {
-    "DEBUG": "\033[36m",  # Cyan
-    "INFO": "\033[32m",  # Green
-    "WARNING": "\033[33m",  # Yellow
-    "ERROR": "\033[31m",  # Red
-    "CRITICAL": "\033[41m",  # Red background
+    "DEBUG": "\033[36m",
+    "INFO": "\033[32m",
+    "WARNING": "\033[33m",
+    "ERROR": "\033[31m",
+    "CRITICAL": "\033[41m",
     "RESET": "\033[0m",
 }
 
@@ -187,17 +175,14 @@ class ColoredFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         record_copy = copy.copy(record)
-
         if self.use_color:
             color = LOG_COLORS.get(record.levelname, "")
             reset = LOG_COLORS["RESET"]
             record_copy.msg = f"{color}{record_copy.msg}{reset}"
-
         return super().format(record_copy)
 
 
 def setup_logger(config: PluginConfig) -> logging.Logger:
-    """Configure main logger based on PluginConfig."""
     logger = logging.getLogger("stash_whisparr")
     logger.handlers.clear()
 
@@ -225,6 +210,7 @@ def setup_logger(config: PluginConfig) -> logging.Logger:
             raise NotImplementedError(
                 f"LOG_FILE_TYPE '{config.LOG_FILE_TYPE}' not implemented."
             )
+
         file_formatter = ColoredFormatter(
             fmt="%(asctime)s - %(levelname)s - %(message)s",
             use_color=config.LOG_FILE_USE_COLOR,
@@ -251,9 +237,9 @@ def setup_logger(config: PluginConfig) -> logging.Logger:
 
 
 class DualLogger:
-    def __init__(self, main_logger: logging.Logger, stash_log):
+    def __init__(self, main_logger: logging.Logger, stash_logger):
         self.main_logger = main_logger
-        self.stash_logger = stash_log
+        self.stash_logger = stash_logger
 
     def debug(self, msg: str, *args, **kwargs):
         self.main_logger.debug(msg, *args, **kwargs)
@@ -278,13 +264,7 @@ class DualLogger:
 
 def load_config_logging(toml_path: str, STASH_DATA: dict):
     global CONFIG
-    # Load config first
     CONFIG = load_plugin_config(toml_path=toml_path, stash=STASH_DATA)
-
-    # Setup logger based on the loaded config
     python_logger = setup_logger(CONFIG)
-
-    # Combine with stash log
     dual_logger = DualLogger(python_logger, stash_log)
-
     return dual_logger, CONFIG
