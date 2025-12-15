@@ -1,6 +1,6 @@
 name: Whisparr Bridge
 description: Add matched StashDB scene to Whisparr on update
-version: 0.5
+version: 0.6
 exec:
   - python
   - "{pluginDir}/whisparr-bridge.py"
@@ -83,14 +83,12 @@ settings:
   LOG_FILE_MAX_BYTES:
     displayName: Max File Size (bytes)
     description: Only for ROTATING_SIZE log type
-    type: INTEGER
-    default: 5000000
+    type: NUMBER
 
   LOG_FILE_BACKUP_COUNT:
     displayName: File Backup Count
     description: Number of backups for rotating logs
-    type: INTEGER
-    default: 3
+    type: NUMBER
 
   LOG_FILE_ROTATE_WHEN:
     displayName: Rotate Logs When
@@ -106,9 +104,9 @@ settings:
   MAX_LOG_BODY:
     displayName: Max Log Body
     description: Maximum number of characters to log per message
-    type: INTEGER
+    type: NUMBER
 
   MAX_PATH_LENGTH:
     displayName: Max Path Length
     description: Maximum length of file paths in logs
-    type: INTEGER
+    type: NUMBER
