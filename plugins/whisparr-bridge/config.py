@@ -4,12 +4,13 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import tomli
 from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
                       field_validator)
 from stashapi import log as stash_log
+from stashapi.stashapp import StashInterface
 
 
 # =========================
@@ -39,7 +40,9 @@ class PluginConfig(BaseModel):
     LOG_FILE_BACKUP_COUNT: int = 3
     LOG_FILE_ROTATE_WHEN: str = "midnight"
     LOG_FILE_USE_COLOR: bool = False
-    LOG_CONSOLE_ENABLE: bool = False
+    LOG_CONSOLE_ENABLE: bool = True
+
+    PATH_MAPPING: Dict[str, str] = Field(default_factory=dict)
 
     # Limits
     MAX_LOG_BODY: int = 1000
@@ -86,9 +89,10 @@ def load_from_toml(path: str) -> dict:
 def load_plugin_config(
     toml_path: str = "config.toml", stash: Optional[dict] = None
 ) -> PluginConfig:
+
     config = PluginConfig()  # defaults
 
-    path = Path(toml_path)
+    path = Path(toml_path).expanduser().resolve()
     if path.is_file():
         try:
             with path.open("rb") as f:
@@ -102,19 +106,22 @@ def load_plugin_config(
         stash_log.warning(f"Config file {toml_path} not found. Using defaults.")
 
     if stash:
-        plugin_cfg = stash.get("plugins", {}).get("whisparr-bridge", {})
-        if isinstance(plugin_cfg, dict):
-            try:
-                config = config.model_copy(update=plugin_cfg)
-                stash_log.info("Stash plugin settings merged and validated into config")
-            except ValidationError as e:
-                stash_log.error(f"Stash plugin settings validation failed: {e}")
-                raise
-        else:
-            stash_log.warning(
-                "Stash plugin settings not found or invalid. Skipping merge."
-            )
+        # Stash API client
+        stash_api = StashInterface(stash["server_connection"])
+        try:
+            stash_config = stash_api.get_configuration()
+        except Exception as e:
+            return {}
+        plugin_cfg = stash_config.get("plugins", {}).get("whisparr-bridge", {})
+        stash_log.debug(f"SettingsFromUI: {plugin_cfg}")
 
+        try:
+            config = config.model_copy(update=plugin_cfg)
+            stash_log.info("Stash plugin settings merged and validated into config")
+        except ValidationError as e:
+            stash_log.error(f"Stash plugin settings validation failed: {e}")
+
+    stash_log.debug(f"Config Loaded as {safe_json_preview(config)}")
     if not config.WHISPARR_URL or not config.WHISPARR_KEY:
         stash_log.error("Whisparr URL and API key must be set in config.")
         raise ValueError("Missing critical Whisparr configuration fields")
@@ -144,7 +151,7 @@ def safe_json_preview(data: Any) -> str:
     try:
         if isinstance(data, dict):
             redacted = dict(data)
-            for k in ("apiKey", "X-Api-Key", "apikey"):
+            for k in ("apiKey", "X-Api-Key", "apikey", "WHISPARR_KEY"):
                 if k in redacted:
                     redacted[k] = "***REDACTED***"
             text = json.dumps(redacted, default=str)
@@ -237,34 +244,56 @@ def setup_logger(config: PluginConfig) -> logging.Logger:
 
 
 class DualLogger:
+    def _format(self, msg, args):
+        if args:
+            try:
+                return msg % args
+            except Exception:
+                return f"{msg} {' '.join(map(str, args))}"
+        return msg
+
     def __init__(self, main_logger: logging.Logger, stash_logger):
         self.main_logger = main_logger
         self.stash_logger = stash_logger
 
     def debug(self, msg: str, *args, **kwargs):
+        formatted = self._format(msg, args)
         self.main_logger.debug(msg, *args, **kwargs)
-        self.stash_logger.debug(msg)
+        self.stash_logger.debug(formatted)
 
     def info(self, msg: str, *args, **kwargs):
+        formatted = self._format(msg, args)
         self.main_logger.info(msg, *args, **kwargs)
-        self.stash_logger.info(msg)
+        self.stash_logger.info(formatted)
 
     def warning(self, msg: str, *args, **kwargs):
+        formatted = self._format(msg, args)
         self.main_logger.warning(msg, *args, **kwargs)
-        self.stash_logger.warning(msg)
+        self.stash_logger.warning(formatted)
 
     def error(self, msg: str, *args, **kwargs):
-        self.main_logger.error(msg, *args, **kwargs)
-        self.stash_logger.error(msg)
+        formatted = self._format(msg, args)
+        self.main_logger.error(formatted, **kwargs)
+        self.stash_logger.error(formatted)
 
     def exception(self, msg: str, *args, **kwargs):
-        self.main_logger.exception(msg, *args, **kwargs)
-        self.stash_logger.error(msg)
+        formatted = self._format(msg, args)
+        self.main_logger.exception(formatted, **kwargs)
+        self.stash_logger.error(formatted)
 
 
-def load_config_logging(toml_path: str, STASH_DATA: dict):
+def load_config_logging(toml_path: str, STASH_DATA: dict, dev: bool, stash_log=None):
     global CONFIG
-    CONFIG = load_plugin_config(toml_path=toml_path, stash=STASH_DATA)
+
+    # Build kwargs for load_plugin_config
+    kwargs = {}
+    if not dev:
+        kwargs["stash"] = STASH_DATA
+
+    CONFIG = load_plugin_config(toml_path=toml_path, **kwargs)
     python_logger = setup_logger(CONFIG)
-    dual_logger = DualLogger(python_logger, stash_log)
+
+    # Wrap logger only if not in dev mode
+    dual_logger = python_logger if dev else DualLogger(python_logger, stash_log)
+
     return dual_logger, CONFIG

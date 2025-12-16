@@ -2,17 +2,16 @@
 # =========================
 # Imports
 # =========================
-
+import argparse
 import json
 import logging
-import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-# 3rd Party
 import requests
-# Local
+import tomli
 from config import (PluginConfig, load_config_logging, safe_json_preview,
                     truncate_path)
 from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
@@ -42,6 +41,13 @@ class ManualImportError(WhisparrError):
 # =========================
 # Helpers
 # =========================
+def load_from_toml(path: str) -> dict:
+    p = Path(path).absolute()
+    print(p)
+    if not p.is_file():
+        return {}
+    with p.open("rb") as f:
+        return tomli.load(f)
 
 
 def has_ignored_tag(scene: "StashSceneModel", ignore_tags: List) -> Optional[str]:
@@ -49,6 +55,47 @@ def has_ignored_tag(scene: "StashSceneModel", ignore_tags: List) -> Optional[str
         if tag in ignore_tags:
             return tag
     return None
+
+
+def wait_for_file(path: Path, timeout: float = 5.0, interval: float = 0.05) -> bool:
+    """
+    Wait until the file exists on disk or timeout is reached.
+    Returns True if file appeared, False if timeout reached.
+    """
+    start_time = time.monotonic()
+    while not path.exists():
+        if time.monotonic() - start_time > timeout:
+            logger.warning(
+                "File did not appear in target folder within %.1f seconds: %s",
+                timeout,
+                path,
+            )
+            return False
+        time.sleep(interval)
+    return True
+
+
+def map_to_local_fs(path: Path, mappings: dict) -> Path:
+    """
+    Translate a server path into a local filesystem path using the mapping.
+    Preserves full relative path including filename.
+    Handles leading slashes and Windows/Unix normalization.
+    """
+    path_str = path.as_posix()  # keep forward slashes
+    logger.debug("Original path: %s", path_str)
+
+    for server_prefix, local_prefix in mappings.items():
+        server_prefix = Path(server_prefix).as_posix().rstrip("/")
+        local_prefix = Path(local_prefix).as_posix().rstrip("/")
+
+        # Remove any trailing slash from path before matching
+        if path_str.startswith(server_prefix + "/") or path_str == server_prefix:
+            rel_path = path_str[len(server_prefix) :].lstrip("/")
+            mapped_path = Path(local_prefix) / Path(rel_path)
+            return mapped_path
+
+    # No mapping applied, return original path
+    return path
 
 
 # =========================
@@ -113,15 +160,32 @@ class ManualImportCommand(Command):
     importMode: str = "auto"
 
 
+class CommandResponse(RetrievedModel):
+    id: int
+    result: str = "unknown"
+    status: str = "queued"
+
+
 class RenameCommand(Command):
     name: str = "RenameFiles"
     movieIds: List[int]
+
+
+class RefreshMovieCommand(Command):
+    name: str = "RefreshMovie"
+    movieIds: List[int]
+
+
+class WhisparrStatistics(RetrievedModel):
+    movieFileCount: int
+    sizeOnDisk: int
 
 
 class WhisparrScene(RetrievedModel):
     title: str
     id: int
     path: Path
+    statistics: WhisparrStatistics
 
     @field_validator("path", mode="before")
     def convert_to_path(cls, v: Any) -> Optional[Path]:
@@ -164,7 +228,6 @@ class StashSceneModel(RetrievedModel):
             return [item["name"] for item in v]
         return v
 
-    @property
     @computed_field
     def stashdb_id(self) -> Optional[str]:
         for sid in self.stash_ids:
@@ -172,7 +235,6 @@ class StashSceneModel(RetrievedModel):
                 return sid.get("stash_id")
         return None
 
-    @property
     @computed_field
     def paths(self) -> List[Path]:
         return [f.path for f in self.files if f.path]
@@ -192,6 +254,7 @@ def http_json(
     timeout: int = 30,
     response_model: Optional[Type[BaseModel]] = None,
     response_is_list: bool = False,
+    dev: bool = False,
 ) -> Tuple[int, Union[BaseModel, List[BaseModel], dict, str]]:
 
     _session = requests.Session()
@@ -226,6 +289,9 @@ def http_json(
             raise WhisparrError(msg)
 
         if response_model:
+            if dev:
+                logger.debug("Attempting Parse to %s", response_model)
+                logger.debug("raw data: %s", parsed)
             try:
                 if response_is_list and isinstance(parsed, list):
                     return r.status_code, [response_model(**item) for item in parsed]
@@ -239,6 +305,83 @@ def http_json(
     except requests.RequestException as e:
         logger.exception("HTTP request failed for %s %s", method, url)
         raise WhisparrError(f"HTTP request failed for {method} {url}: {e}") from e
+
+
+class FileManager:
+    def __init__(self, config: PluginConfig, source: Path, destination: Path):
+        self.og_source: Path = source.parent
+        self.og_destination: Path = destination
+        self.name: str = source.name
+        # Apply path mapping
+        self.source: Path = self._path_mapping(source.parent, config.PATH_MAPPING)
+        self.destination: Path = self._path_mapping(destination, config.PATH_MAPPING)
+
+    def _path_mapping(self, path: Path, pathmap: dict) -> Path:
+        """
+        Map a server path to the local filesystem if a pathmap is provided.
+        """
+        if pathmap:
+            logger.warning("Mapping paths: %s", pathmap)
+            return map_to_local_fs(path, pathmap)
+        return path
+
+    def exists(self) -> Path:
+        source_file = self.source / self.name
+        destination_file = self.destination / self.name
+        if source_file.exists():
+            logger.debug("File is in Stash Directory")
+            return source_file
+        else:
+            if destination_file.exists():
+                logger.debug("File is in the Whisparr Directory")
+                return destination_file
+            else:
+                logger.error("Unable to Locate the File. Dumping info.")
+                logger.error("Source: %s", source_file)
+                logger.error("Destination: %s", destination_file)
+
+    def move(self, source: Path, retries: int = 5, delay: float = 0.5) -> bool:
+        try:
+            # Ensure source exists
+            if not source.is_file():
+                logger.warning("Source file does not exist: %s", self.source)
+                return False
+
+            # Construct full destination path
+            target_file = self.destination / self.name
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            logger.info("source: %s", source)
+            logger.info("target_file: %s", target_file)
+            if source != target_file:
+                # Move/replace the file
+                source.replace(target_file)
+
+                # Retry checking if the file exists with exponential backoff
+                for attempt in range(retries):
+                    if target_file.is_file():
+                        logger.info(
+                            "File moved successfully: %s -> %s",
+                            self.source,
+                            target_file,
+                        )
+                        return True
+                    sleep_time = delay * (2**attempt)  # Exponential backoff
+                    time.sleep(sleep_time)
+
+                logger.warning(
+                    "File move completed but target file still not found after retries: %s",
+                    target_file,
+                )
+                return False
+            else:
+                logger.info("File is already in the correct directory")
+                return False
+
+        except Exception as e:
+            logger.exception(
+                "Failed to move file %s -> %s: %s", self.source, target_file, e
+            )
+            return False
 
 
 # =========================
@@ -263,6 +406,8 @@ class WhisparrInterface:
         self.rename: bool = config.WHISPARR_RENAME
         self.root_dir: str = str(config.ROOT_FOLDER)
         self.qualprofile: str = config.QUALITY_PROFILE
+        self.config: Dict = config
+        self.filenames: str = stash_scene.files
 
     def process_scene(self) -> None:
         """
@@ -273,8 +418,11 @@ class WhisparrInterface:
 
         if not self.whisparr_scene:
             self.create_scene()
-
-        self.process_stash_files()
+        did_move_files = self.process_stash_files()
+        logger.debug("Did any file move operations happen? %s", did_move_files)
+        if did_move_files:
+            self._queue_command("RefreshMovie")
+        self.import_stash_file()
 
     def find_existing_scene(self) -> Optional[WhisparrScene]:
         if self.stash_scene.stashdb_id is None:
@@ -293,7 +441,7 @@ class WhisparrInterface:
         if len(scenes) != 1:
             logger.error("Whisparr returned %d scenes", len(scenes))
             return None
-        logger.info("Movie already exists in Whisparr: %s", scenes[0].title)
+        logger.info("Scene already exists in Whisparr: %s", scenes[0])
         return scenes[0]
 
     def create_scene(self) -> None:
@@ -335,94 +483,46 @@ class WhisparrInterface:
             logger.error(msg)
             raise WhisparrError(msg)
 
-    def process_stash_files(self) -> None:
+    def process_stash_files(self):
         """Process each file in the Stash scene."""
         if not self.whisparr_scene:
             raise SceneNotFoundError(
                 "Whisparr scene not set up. Call process_scene() first."
             )
-
+        Stashfilez = []
         for stash_path in self.stash_scene.paths:
-            logger.info("Checking Stash file: %s", truncate_path(stash_path))
-            if not stash_path.exists():
-                logger.warning("File does not exist: %s", truncate_path(stash_path))
-                continue
             try:
-                if self.ensure_file_location(stash_path):
-                    self.import_stash_file(stash_path)
+                logger.info("Checking Stash file: %s", truncate_path(stash_path))
+                filehandl = FileManager(
+                    self.config, source=stash_path, destination=self.whisparr_scene.path
+                )
+                logger.info("File is at %s", filehandl.exists())
+                Stashfilez.append(filehandl)
             except Exception as e:
                 logger.exception(
                     "Error processing file %s: %s", truncate_path(stash_path), e
                 )
 
-    def ensure_file_location(self, stash_path: Path) -> bool:
-        """Ensure the file is in the correct Whisparr directory, moving it if necessary."""
-        assert self.whisparr_scene is not None
-        target_dir = self.whisparr_scene.path
-        if not target_dir:
-            logger.error("Whisparr scene has no path defined.")
-            return False
-
-        if stash_path.parent.resolve() == target_dir.resolve():
-            logger.info(
-                "File already in Whisparr directory: %s", truncate_path(stash_path)
-            )
-            return True
-
+        files_moved = []
         if self.move:
-            try:
-                target_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                logger.exception(
-                    "Failed to create target directory %s: %s",
-                    truncate_path(target_dir),
-                    e,
-                )
-                return False
+            for file in Stashfilez:
+                source = file.exists()
+                moved = file.move(source)
+                files_moved.append(moved)
+        return any(files_moved)
 
-            target_file = target_dir / stash_path.name
-            counter = 1
-            while target_file.exists():
-                target_file = (
-                    target_dir / f"{stash_path.stem}_{counter}{stash_path.suffix}"
-                )
-                counter += 1
-
-            try:
-                shutil.move(str(stash_path), str(target_file))
-                logger.info(
-                    "Moved file to Whisparr directory: %s", truncate_path(target_file)
-                )
-            except Exception as e:
-                logger.exception(
-                    "Failed to move file %s to %s: %s",
-                    truncate_path(stash_path),
-                    truncate_path(target_file),
-                    e,
-                )
-                return False
-            return True
-
-        logger.debug(
-            "File not in target directory, and MOVE_FILES=False: %s",
-            truncate_path(stash_path),
-        )
-        return False
-
-    def import_stash_file(self, stash_path: Path) -> None:
-        matched_preview = self._get_matching_preview_file(stash_path)
+    def import_stash_file(self) -> None:
+        matched_preview = self._get_matching_preview_file()
         if matched_preview is None:
             return
         self._execute_manual_import(matched_preview)
         if self.rename:
-            self._queue_rename()
+            self._queue_command("RenameFiles")
 
-    def _get_manual_import_preview(
-        self, stash_path: Path
-    ) -> List[ManualImportPreviewFile]:
+    def _get_manual_import_preview(self) -> List[ManualImportPreviewFile]:
         assert self.whisparr_scene is not None
         params = ManualImportParams(
-            folder=stash_path.parent.as_posix(), movieId=self.whisparr_scene.id
+            folder=self.whisparr_scene.path.as_posix(), movieId=self.whisparr_scene.id
         )
         status, previews = self.http_json(
             method="GET",
@@ -433,16 +533,20 @@ class WhisparrInterface:
             response_is_list=True,
         )
         if status != 200 or not previews:
-            raise ManualImportError(f"Manual import preview failed: {previews}")
+            if self.whisparr_scene.statistics.movieFileCount == len(
+                self.stash_scene.files
+            ):
+                logger.info("File has already been imported to Whisparr")
+            else:
+                raise ManualImportError(f"Manual import preview failed: {previews}")
         return previews
 
-    def _get_matching_preview_file(
-        self, stash_path: Path
-    ) -> Optional[ManualImportPreviewFile]:
-        previews = self._get_manual_import_preview(stash_path)
-        matched = next((f for f in previews if f.path.name == stash_path.name), None)
+    def _get_matching_preview_file(self) -> Optional[ManualImportPreviewFile]:
+        previews = self._get_manual_import_preview()
+        for g in self.filenames:
+            matched = next((f for f in previews if f.path.name == g.path.name), None)
         if not matched:
-            logger.info("All files already imported to Whisparr: %s", stash_path)
+            logger.info("All files already imported to Whisparr")
             return None
         return matched
 
@@ -468,13 +572,12 @@ class WhisparrInterface:
             raise ManualImportError(f"Manual import command failed: {resp}")
         logger.info("Manual import executed successfully for %s", preview_file.path)
 
-    def _queue_rename(self) -> None:
-        """Queue rename command if enabled and files were imported/moved."""
-        if not self.whisparr_scene:
-            logger.warning("Cannot queue rename; Whisparr scene not set.")
-            return
+    def _queue_command(self, commandname: str = "RefreshMovie") -> None:
         try:
-            command = RenameCommand(movieIds=[self.whisparr_scene.id])
+            if commandname is "RefreshMovie":
+                command = RefreshMovieCommand(movieIds=[self.whisparr_scene.id])
+            if commandname is "RenameFiles":
+                command = RenameCommand(movieIds=[self.whisparr_scene.id])
             status, resp = self.http_json(
                 method="POST",
                 url=f"{self.url}/api/v3/command",
@@ -483,12 +586,16 @@ class WhisparrInterface:
             )
             if status in (200, 201):
                 logger.info(
-                    "Rename command queued for movie ID: %s", self.whisparr_scene.id
+                    "%s command queued for movie ID: %s",
+                    commandname,
+                    self.whisparr_scene.id,
                 )
+                logger.debug("response: %s", resp)
+                return CommandResponse(**resp.get("body"))
             else:
-                logger.error("Rename command failed: %s", resp)
+                logger.error("%s command failed: %s", commandname, resp)
         except Exception as e:
-            logger.exception("Failed to queue rename command: %s", e)
+            logger.exception("Failed to queue %s command: %s", commandname, e)
 
     def get_default_quality_profile(self) -> int:
         status, qps = self.http_json(
@@ -526,7 +633,8 @@ class WhisparrInterface:
 # =========================
 
 
-def main(scene_id: Optional[int] = None) -> None:
+def main(scene_id: Optional[int] = None, dev: Optional[bool] = False) -> None:
+    global logger
     """
     Main entry point for the Whisparr bridge hook.
 
@@ -537,23 +645,33 @@ def main(scene_id: Optional[int] = None) -> None:
     Args:
         scene_id (Optional[int]): If provided, overrides the scene ID from the Stash hook data.
     """
-
+    if dev:
+        print("\n\n***DEV_MODE***\n\n")
+        toml_path = "dev.toml"
+    else:
+        toml_path = "config.toml"
     # 1. Read and parse hook data from stdin
-    STASH_DATA = None
-    try:
-        raw_data = sys.stdin.read()
-        if not raw_data.strip():
-            print("No input data received from Stash hook.")
+    STASH_DATA = {}
+    if not dev:
+        try:
+            raw_data = sys.stdin.read()
+            if not raw_data.strip():
+                print("No input data received from Stash hook.")
+                return
+            STASH_DATA = json.loads(raw_data)
+        except Exception as e:
+            print(f"Failed to parse input JSON: {e}")
             return
-        STASH_DATA = json.loads(raw_data)
-    except Exception as e:
-        print(f"Failed to parse input JSON: {e}")
-        return
+    else:
+        dev_config = load_from_toml(toml_path)
+        for thing, data in dev_config.items():
+            print(f"{thing}|{data}")
+        STASH_DATA["server_connection"] = dev_config.get("STASH_CONFIG")
 
     # 2. Load configuration and initialize logger
     try:
         logger, config = load_config_logging(
-            toml_path="config.toml", STASH_DATA=STASH_DATA
+            toml_path=toml_path, STASH_DATA=STASH_DATA, dev=dev
         )
     except Exception as e:
         print(f"Failed to load configuration: {e}")
@@ -583,10 +701,11 @@ def main(scene_id: Optional[int] = None) -> None:
         if not scene_data:
             logger.error("Scene %s not found in Stash.", scene_id)
             return
-
         scene = StashSceneModel(
             **scene_data, stashdb_endpoint_substr=config.STASHDB_ENDPOINT_SUBSTR
         )
+        if dev:
+            logger.debug("Scene Data from Stash: %s", scene)
     except ValidationError as e:
         logger.exception("Scene data validation failed: %s", e)
         return
@@ -612,4 +731,17 @@ def main(scene_id: Optional[int] = None) -> None:
     except WhisparrError as e:
         logger.exception("Whisparr processing error: %s", e)
     except Exception as e:
-        logger.exception("Unexpected error during scene processing: %s", e)
+        logger.exception(f"Unexpected error during scene processing: {e}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run the main function with optional arguments."
+    )
+    parser.add_argument(
+        "--scene_id", type=int, help="Optional scene ID to run", default=None
+    )
+    parser.add_argument("--dev", action="store_true", help="Run in development mode")
+
+    args = parser.parse_args()
+    main(scene_id=args.scene_id, dev=args.dev)
