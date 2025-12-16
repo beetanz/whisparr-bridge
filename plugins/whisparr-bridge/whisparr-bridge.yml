@@ -1,6 +1,6 @@
 name: Whisparr Bridge
 description: Add matched StashDB scene to Whisparr on update
-version: 0.6
+version: 0.7
 exec:
   - python
   - "{pluginDir}/whisparr-bridge.py"
@@ -15,7 +15,7 @@ settings:
   WHISPARR_URL:
     displayName: Whisparr URL
     type: STRING
-  WHISPARR_API_KEY:
+  WHISPARR_KEY:
     displayName: Whisparr API Key
     type: STRING
   STASHDB_ENDPOINT_SUBSTR:
