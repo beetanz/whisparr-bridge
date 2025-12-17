@@ -2,7 +2,6 @@ import copy
 import json
 import logging
 import sys
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -179,62 +178,57 @@ def safe_json_preview(data: Any) -> str:
 # =========================
 # Logging
 # =========================
-LOG_COLORS = {
-    "DEBUG": "\033[36m",
-    "INFO": "\033[32m",
-    "WARNING": "\033[33m",
-    "ERROR": "\033[31m",
-    "CRITICAL": "\033[41m",
-    "RESET": "\033[0m",
-}
+def switch_scene_log(logger: logging.Logger, scene_id: int):
+    """Switch the log file to a new scene-specific file."""
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            base_dir = Path(handler.baseFilename).parent
+            new_file = base_dir / f"scene_{scene_id}.log"
+            # Close current file and reassign
+            handler.close()
+            handler.baseFilename = str(new_file)
+            handler.stream = handler._open()
+            logger.info(f"Logging switched to scene {scene_id}")
+            return
+    raise RuntimeError("No FileHandler found to switch log file")
 
 
 class ColoredFormatter(logging.Formatter):
-    def __init__(self, fmt=None, datefmt=None, use_color=True):
-        super().__init__(fmt, datefmt)
+    LOG_COLORS = {
+        "DEBUG": "\033[36m",
+        "INFO": "\033[32m",
+        "WARNING": "\033[33m",
+        "ERROR": "\033[31m",
+        "CRITICAL": "\033[41m",
+        "RESET": "\033[0m",
+    }
+
+    def __init__(self, fmt=None, use_color=True):
+        super().__init__(fmt)
         self.use_color = use_color
 
     def format(self, record: logging.LogRecord) -> str:
-        record_copy = copy.copy(record)
+        msg = super().format(record)
         if self.use_color:
-            color = LOG_COLORS.get(record.levelname, "")
-            reset = LOG_COLORS["RESET"]
-            record_copy.msg = f"{color}{record_copy.msg}{reset}"
-        return super().format(record_copy)
+            color = self.LOG_COLORS.get(record.levelname, "")
+            reset = self.LOG_COLORS["RESET"]
+            msg = f"{color}{msg}{reset}"
+        return msg
 
 
-def setup_logger(config: PluginConfig, scene_id: int) -> logging.Logger:
+def setup_logger(config, default_scene_id: int = 0) -> logging.Logger:
+    """Initialize the centralized logger with options from PluginConfig."""
     logger = logging.getLogger("stash_whisparr")
     logger.handlers.clear()
+    logger.setLevel(logging.DEBUG)
 
+    # Determine log file path
     if config.LOG_FILE_ENABLE:
-        log_file_path = config.LOG_FILE_LOCATION / f"{str(scene_id)}.log"
+        log_file_path = config.LOG_FILE_LOCATION / "WhisparrBridge.log"
         log_file_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file_path.touch(exist_ok=True)
-
-        if config.LOG_FILE_TYPE.upper() == "SINGLE-FILE":
-            file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
-        elif config.LOG_FILE_TYPE.upper() == "ROTATING_SIZE":
-            file_handler = RotatingFileHandler(
-                log_file_path,
-                maxBytes=config.LOG_FILE_MAX_BYTES,
-                backupCount=config.LOG_FILE_BACKUP_COUNT,
-                encoding="utf-8",
-            )
-        elif config.LOG_FILE_TYPE.upper() == "ROTATING_TIME":
-            file_handler = TimedRotatingFileHandler(
-                log_file_path,
-                when=config.LOG_FILE_ROTATE_WHEN,
-                backupCount=config.LOG_FILE_BACKUP_COUNT,
-                encoding="utf-8",
-            )
-        else:
-            raise NotImplementedError(
-                f"LOG_FILE_TYPE '{config.LOG_FILE_TYPE}' not implemented."
-            )
-
+        file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
         file_formatter = ColoredFormatter(
-            fmt="%(asctime)s - %(levelname)s - %(message)s",
+            "%(asctime)s - %(levelname)s - %(message)s",
             use_color=config.LOG_FILE_USE_COLOR,
         )
         file_handler.setFormatter(file_formatter)
@@ -243,10 +237,11 @@ def setup_logger(config: PluginConfig, scene_id: int) -> logging.Logger:
         )
         logger.addHandler(file_handler)
 
+    # Console handler
     if config.LOG_CONSOLE_ENABLE:
         console_handler = logging.StreamHandler(sys.stdout)
         console_formatter = ColoredFormatter(
-            fmt="%(asctime)s - %(levelname)s - %(message)s", use_color=True
+            "%(asctime)s - %(levelname)s - %(message)s", use_color=True
         )
         console_handler.setFormatter(console_formatter)
         console_handler.setLevel(
@@ -254,52 +249,23 @@ def setup_logger(config: PluginConfig, scene_id: int) -> logging.Logger:
         )
         logger.addHandler(console_handler)
 
-    logger.setLevel(logging.DEBUG)
     return logger
 
-
-class DualLogger:
-    def _format(self, msg, args):
-        if args:
-            try:
-                return msg % args
-            except Exception:
-                return f"{msg} {' '.join(map(str, args))}"
-        return msg
-
-    def __init__(self, main_logger: logging.Logger, stash_logger):
-        self.main_logger = main_logger
+class StashHandler(logging.Handler):
+    def __init__(self, stash_logger):
+        super().__init__()
         self.stash_logger = stash_logger
 
-    def debug(self, msg: str, *args, **kwargs):
-        formatted = self._format(msg, args)
-        self.main_logger.debug(msg, *args, **kwargs)
-        self.stash_logger.debug(formatted)
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            level = record.levelname.lower()
+            log_fn = getattr(self.stash_logger, level, self.stash_logger.info)
+            log_fn(msg)
+        except Exception:
+            self.handleError(record)
 
-    def info(self, msg: str, *args, **kwargs):
-        formatted = self._format(msg, args)
-        self.main_logger.info(msg, *args, **kwargs)
-        self.stash_logger.info(formatted)
-
-    def warning(self, msg: str, *args, **kwargs):
-        formatted = self._format(msg, args)
-        self.main_logger.warning(msg, *args, **kwargs)
-        self.stash_logger.warning(formatted)
-
-    def error(self, msg: str, *args, **kwargs):
-        formatted = self._format(msg, args)
-        self.main_logger.error(formatted, **kwargs)
-        self.stash_logger.error(formatted)
-
-    def exception(self, msg: str, *args, **kwargs):
-        formatted = self._format(msg, args)
-        self.main_logger.exception(formatted, **kwargs)
-        self.stash_logger.error(formatted)
-
-
-def load_config_logging(
-    toml_path: str, STASH_DATA: dict, dev: bool, scene_id: int, stash_log=None
-):
+def load_config_logging(toml_path: str, STASH_DATA: dict, dev: bool):
     global CONFIG
 
     # Build kwargs for load_plugin_config
@@ -309,16 +275,14 @@ def load_config_logging(
 
     CONFIG = load_plugin_config(toml_path=toml_path, **kwargs)
 
-    python_logger = setup_logger(CONFIG, scene_id)
+    python_logger = setup_logger(CONFIG)
 
-    # Wrap logger only if not in dev mode
-    try:
-        dual_logger = python_logger if dev else DualLogger(python_logger, stash_log)
-    except Exception as e:
-        print(f"logging initialization failed: {e}", file=sys.stderr)
-        import traceback
+    if not dev:
+        stash_handler = StashHandler(stash_log)
+        stash_handler.setLevel(logging.DEBUG)
+        stash_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        python_logger.addHandler(stash_handler)
 
-        traceback.print_exc()
-        raise
-
-    return dual_logger, CONFIG
+    return python_logger, CONFIG
