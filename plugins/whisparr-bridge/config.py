@@ -18,8 +18,8 @@ from stashapi.stashapp import StashInterface
 # =========================
 class PluginConfig(BaseModel):
     # Core
-    WHISPARR_URL: str = ""
-    WHISPARR_KEY: str = ""
+    WHISPARR_URL: str
+    WHISPARR_KEY: str
     STASHDB_ENDPOINT_SUBSTR: str = "stashdb.org"
 
     # Behavior
@@ -27,14 +27,15 @@ class PluginConfig(BaseModel):
     MOVE_FILES: bool = False
     WHISPARR_RENAME: bool = True
     QUALITY_PROFILE: str = "Any"
-    ROOT_FOLDER: Optional[str] = str("")
+    ROOT_FOLDER: Optional[Path] = None
     IGNORE_TAGS: List[str] = Field(default_factory=list)
+    DEV_MODE: bool = False
 
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE_ENABLE: bool = False
     LOG_FILE_LEVEL: str = "DEBUG"
-    LOG_FILE_LOCATION: str = ""
+    LOG_FILE_LOCATION: Path = Path("./logs")
     LOG_FILE_TYPE: str = "SINGLE-FILE"
     LOG_FILE_MAX_BYTES: int = 5_000_000
     LOG_FILE_BACKUP_COUNT: int = 3
@@ -67,6 +68,13 @@ class PluginConfig(BaseModel):
                 return [t.strip() for t in v.split(",") if t.strip()]
         return list(v)
 
+    @field_validator("LOG_FILE_LOCATION", "ROOT_FOLDER", mode="before")
+    @classmethod
+    def normalize_paths(cls, v):
+        if v in ("", None):
+            return None
+        return Path(v).expanduser().resolve()
+
     @field_validator("WHISPARR_URL", "WHISPARR_KEY", mode="before")
     @classmethod
     def not_empty(cls, v: str):
@@ -87,44 +95,50 @@ def load_from_toml(path: str) -> dict:
 
 
 def load_plugin_config(
-    toml_path: str = "config.toml", stash: Optional[dict] = None
+    toml_path: str = "config.toml",
+    stash: Optional[dict] = None,
 ) -> PluginConfig:
 
-    config = PluginConfig()  # defaults
+    merged: dict = {}
 
-    path = Path(toml_path).expanduser().resolve()
+    # ---- TOML ----
+    path = Path(toml_path).expanduser().resolve(strict=False)
     if path.is_file():
         try:
             with path.open("rb") as f:
-                toml_data = tomli.load(f)
-            config = config.model_copy(update=toml_data)
-            stash_log.info(f"Configuration loaded and validated from {toml_path}")
+                merged.update(tomli.load(f))
+            stash_log.info(f"Configuration loaded from {toml_path}")
         except Exception as e:
-            stash_log.error(f"Failed to load/validate config from TOML: {e}")
+            stash_log.error(f"Failed to load config from TOML: {e}")
             raise
     else:
-        stash_log.warning(f"Config file {toml_path} not found. Using defaults.")
+        stash_log.info(f"Config file {toml_path} not found.")
 
+    # ---- STASH UI ----
     if stash:
-        # Stash API client
         stash_api = StashInterface(stash["server_connection"])
         try:
             stash_config = stash_api.get_configuration()
+            plugin_cfg = stash_config.get("plugins", {}).get("whisparr-bridge", {})
+            stash_log.debug(f"SettingsFromUI: {plugin_cfg}")
+            merged.update(plugin_cfg)
         except Exception as e:
-            return {}
-        plugin_cfg = stash_config.get("plugins", {}).get("whisparr-bridge", {})
-        stash_log.debug(f"SettingsFromUI: {plugin_cfg}")
+            stash_log.error(f"Failed to load Stash plugin settings: {e}")
 
-        try:
-            config = config.model_copy(update=plugin_cfg)
-            stash_log.info("Stash plugin settings merged and validated into config")
-        except ValidationError as e:
-            stash_log.error(f"Stash plugin settings validation failed: {e}")
+    # ---- VALIDATE ONCE ----
+    try:
+        config = PluginConfig.model_validate(merged)
+    except ValidationError as e:
+        stash_log.error(f"Configuration validation failed: {e}")
+        raise
 
-    stash_log.debug(f"Config Loaded as {safe_json_preview(config)}")
+    # ---- FINAL CHECKS ----
     if not config.WHISPARR_URL or not config.WHISPARR_KEY:
         stash_log.error("Whisparr URL and API key must be set in config.")
         raise ValueError("Missing critical Whisparr configuration fields")
+
+    # if config.DEV_MODE:
+    stash_log.debug(f"Config Loaded as {safe_json_preview(config)}")
 
     return config
 
@@ -189,16 +203,17 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record_copy)
 
 
-def setup_logger(config: PluginConfig) -> logging.Logger:
+def setup_logger(config: PluginConfig, scene_id: int) -> logging.Logger:
     logger = logging.getLogger("stash_whisparr")
     logger.handlers.clear()
 
     if config.LOG_FILE_ENABLE:
-        log_file_path = config.LOG_FILE_LOCATION or "stashtest.log"
+        log_file_path = config.LOG_FILE_LOCATION / f"{str(scene_id)}.log"
+        log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file_path.touch(exist_ok=True)
+
         if config.LOG_FILE_TYPE.upper() == "SINGLE-FILE":
-            file_handler = logging.FileHandler(
-                log_file_path, mode="w", encoding="utf-8"
-            )
+            file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
         elif config.LOG_FILE_TYPE.upper() == "ROTATING_SIZE":
             file_handler = RotatingFileHandler(
                 log_file_path,
@@ -282,7 +297,9 @@ class DualLogger:
         self.stash_logger.error(formatted)
 
 
-def load_config_logging(toml_path: str, STASH_DATA: dict, dev: bool, stash_log=None):
+def load_config_logging(
+    toml_path: str, STASH_DATA: dict, dev: bool, scene_id: int, stash_log=None
+):
     global CONFIG
 
     # Build kwargs for load_plugin_config
@@ -291,9 +308,17 @@ def load_config_logging(toml_path: str, STASH_DATA: dict, dev: bool, stash_log=N
         kwargs["stash"] = STASH_DATA
 
     CONFIG = load_plugin_config(toml_path=toml_path, **kwargs)
-    python_logger = setup_logger(CONFIG)
+
+    python_logger = setup_logger(CONFIG, scene_id)
 
     # Wrap logger only if not in dev mode
-    dual_logger = python_logger if dev else DualLogger(python_logger, stash_log)
+    try:
+        dual_logger = python_logger if dev else DualLogger(python_logger, stash_log)
+    except Exception as e:
+        print(f"logging initialization failed: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
+        raise
 
     return dual_logger, CONFIG

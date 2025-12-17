@@ -10,7 +10,11 @@ hooks:
   - name: Add on scene update
     triggeredBy:
       - Scene.Update.Post
-
+tasks:
+  - name: "Sync All Scenes to Whisparr"
+    description: Syncs all the scenes in the database to Whisparr
+    defaultArgs:
+      mode: all
 settings:
   WHISPARR_URL:
     displayName: Whisparr URL
@@ -71,7 +75,7 @@ settings:
 
   LOG_FILE_LOCATION:
     displayName: File Log Location
-    description: File path for logs; empty = default
+    description: Directory Path for logs
     type: STRING
 
 

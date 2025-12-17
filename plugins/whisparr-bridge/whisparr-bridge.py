@@ -17,6 +17,7 @@ from config import (PluginConfig, load_config_logging, safe_json_preview,
 from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
                       computed_field, field_validator)
 from requests.adapters import HTTPAdapter
+from stashapi import log as stash_log
 from stashapi.stashapp import StashInterface
 from urllib3.util.retry import Retry
 
@@ -326,19 +327,27 @@ class FileManager:
         return path
 
     def exists(self) -> Path:
-        source_file = self.source / self.name
-        destination_file = self.destination / self.name
+        source_file = (self.source / self.name).resolve()
+        destination_file = (self.destination / self.name).resolve()
+
+        # Same physical file → check once
+        if source_file == destination_file:
+            if source_file.exists():
+                logger.debug("Source and destination are the same file")
+                return source_file
+
         if source_file.exists():
             logger.debug("File is in Stash Directory")
             return source_file
-        else:
-            if destination_file.exists():
-                logger.debug("File is in the Whisparr Directory")
-                return destination_file
-            else:
-                logger.error("Unable to Locate the File. Dumping info.")
-                logger.error("Source: %s", source_file)
-                logger.error("Destination: %s", destination_file)
+
+        if destination_file.exists():
+            logger.debug("File is in the Whisparr Directory")
+            return destination_file
+
+        logger.error("Unable to Locate the File. Dumping info.")
+        logger.error("Source: %s", source_file)
+        logger.error("Destination: %s", destination_file)
+        raise FileNotFoundError(source_file)
 
     def move(self, source: Path, retries: int = 5, delay: float = 0.5) -> bool:
         try:
@@ -348,7 +357,7 @@ class FileManager:
                 return False
 
             # Construct full destination path
-            target_file = self.destination / self.name
+            target_file = (self.destination / self.name).resolve()
             target_file.parent.mkdir(parents=True, exist_ok=True)
             logger.info("source: %s", source)
             logger.info("target_file: %s", target_file)
@@ -518,6 +527,8 @@ class WhisparrInterface:
         self._execute_manual_import(matched_preview)
         if self.rename:
             self._queue_command("RenameFiles")
+        else:
+            self._queue_command("RefreshMovie")
 
     def _get_manual_import_preview(self) -> List[ManualImportPreviewFile]:
         assert self.whisparr_scene is not None
@@ -574,9 +585,9 @@ class WhisparrInterface:
 
     def _queue_command(self, commandname: str = "RefreshMovie") -> None:
         try:
-            if commandname is "RefreshMovie":
+            if commandname == "RefreshMovie":
                 command = RefreshMovieCommand(movieIds=[self.whisparr_scene.id])
-            if commandname is "RenameFiles":
+            if commandname == "RenameFiles":
                 command = RenameCommand(movieIds=[self.whisparr_scene.id])
             status, resp = self.http_json(
                 method="POST",
@@ -591,7 +602,7 @@ class WhisparrInterface:
                     self.whisparr_scene.id,
                 )
                 logger.debug("response: %s", resp)
-                return CommandResponse(**resp.get("body"))
+                # return CommandResponse(**resp.get("body"))
             else:
                 logger.error("%s command failed: %s", commandname, resp)
         except Exception as e:
@@ -647,9 +658,10 @@ def main(scene_id: Optional[int] = None, dev: Optional[bool] = False) -> None:
     """
     if dev:
         print("\n\n***DEV_MODE***\n\n")
-        toml_path = "dev.toml"
+        toml_path = "../../dev.toml"
     else:
-        toml_path = "config.toml"
+        toml_path = "/root/.stash/plugins/whisparr-bridge/config.toml"
+    stash_log.debug("Starting stage 1 - read info from hook")
     # 1. Read and parse hook data from stdin
     STASH_DATA = {}
     if not dev:
@@ -664,20 +676,35 @@ def main(scene_id: Optional[int] = None, dev: Optional[bool] = False) -> None:
             return
     else:
         dev_config = load_from_toml(toml_path)
+        print(f"TOML config:")
+        print(f"------------")
         for thing, data in dev_config.items():
             print(f"{thing}|{data}")
+        print(f"------------")
         STASH_DATA["server_connection"] = dev_config.get("STASH_CONFIG")
-
-    # 2. Load configuration and initialize logger
+    stash_log.debug("Starting stage 2 - get Scene ID")
+    # 2. Determine scene ID
+    hook_context = (STASH_DATA.get("args") or {}).get("hookContext") or {}
+    scene_id = scene_id or hook_context.get("id")
+    if not scene_id:
+        stash_log.info("No scene ID provided by hook; exiting.")
+        return
+    stash_log.debug("Starting stage 3 -load config")
+    # 3. Load configuration and initialize logger
     try:
         logger, config = load_config_logging(
-            toml_path=toml_path, STASH_DATA=STASH_DATA, dev=dev
+            toml_path=toml_path,
+            STASH_DATA=STASH_DATA,
+            dev=dev,
+            scene_id=scene_id,
+            stash_log=stash_log,
         )
+        logger.info("SCENEID %d STARTING", scene_id)
     except Exception as e:
-        print(f"Failed to load configuration: {e}")
+        stash_log.error(f"Failed to load configuration: {e}")
         return
-
-    # 3. Initialize Stash interface
+    stash_log.debug("Starting stage 4 - Initialize Stash Interface")
+    # 4. Initialize Stash interface
     try:
         stash = StashInterface(STASH_DATA["server_connection"])
     except KeyError:
@@ -687,13 +714,7 @@ def main(scene_id: Optional[int] = None, dev: Optional[bool] = False) -> None:
         logger.exception("Failed to initialize StashInterface: %s", e)
         return
 
-    # 4. Determine scene ID
-    hook_context = (STASH_DATA.get("args") or {}).get("hookContext") or {}
-    scene_id = scene_id or hook_context.get("id")
-    if not scene_id:
-        logger.info("No scene ID provided by hook; exiting.")
-        return
-
+    stash_log.debug("Starting stage 5 - Fetch Scene")
     # 5. Fetch scene from Stash
     scene = None
     try:
@@ -714,7 +735,7 @@ def main(scene_id: Optional[int] = None, dev: Optional[bool] = False) -> None:
         return
 
     logger.info("Processing scene: %s", scene.title)
-
+    stash_log.debug("Starting stage 6 - Skip Tags")
     # 6. Skip scene if it has ignored tags
     ignored_tag = has_ignored_tag(scene, config.IGNORE_TAGS)
     if ignored_tag:
@@ -722,7 +743,7 @@ def main(scene_id: Optional[int] = None, dev: Optional[bool] = False) -> None:
             "Scene '%s' skipped due to ignored tag: %s", scene.title, ignored_tag
         )
         return
-
+    stash_log.debug("Starting stage 7 - Whisparr Processing")
     # 7. Process scene with Whisparr
     whisparr = WhisparrInterface(config=config, stash_scene=scene)
     try:
