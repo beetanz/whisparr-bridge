@@ -1,6 +1,6 @@
 name: Whisparr Bridge
 description: Add matched StashDB scene to Whisparr on update
-version: 0.7
+version: 1.0
 exec:
   - python
   - "{pluginDir}/whisparr-bridge.py"
@@ -10,7 +10,11 @@ hooks:
   - name: Add on scene update
     triggeredBy:
       - Scene.Update.Post
-
+tasks:
+  - name: "Sync All Scenes to Whisparr"
+    description: Syncs all the scenes in the database to Whisparr
+    defaultArgs:
+      mode: bulk
 settings:
   WHISPARR_URL:
     displayName: Whisparr URL
@@ -71,28 +75,7 @@ settings:
 
   LOG_FILE_LOCATION:
     displayName: File Log Location
-    description: File path for logs; empty = default
-    type: STRING
-
-
-  LOG_FILE_TYPE:
-    displayName: Log File Type
-    description: Options SINGLE-FILE, ROTATING_SIZE, ROTATING_TIME
-    type: STRING
-
-  LOG_FILE_MAX_BYTES:
-    displayName: Max File Size (bytes)
-    description: Only for ROTATING_SIZE log type
-    type: NUMBER
-
-  LOG_FILE_BACKUP_COUNT:
-    displayName: File Backup Count
-    description: Number of backups for rotating logs
-    type: NUMBER
-
-  LOG_FILE_ROTATE_WHEN:
-    displayName: Rotate Logs When
-    description: Only for ROTATING_TIME type
+    description: Directory Path for logs
     type: STRING
 
   LOG_FILE_USE_COLOR:

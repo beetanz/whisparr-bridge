@@ -1,6 +1,6 @@
 [project]
 name = "whisparr-bridge"
-version = "0.7.0"
+version = "1.0.0"
 description = "A stash plugin bridge to Whisparr v3 (eros)"
 authors = [
     {name = "Your Name",email = "you@example.com"}
